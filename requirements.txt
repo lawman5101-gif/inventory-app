@@ -1,4 +1,13 @@
 streamlit
+
 pandas
+
 altair
+
 openpyxl
+
+gspread
+
+google-auth
+
+reportlab
