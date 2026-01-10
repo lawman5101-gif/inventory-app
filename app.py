@@ -68,7 +68,10 @@ if menu == "📤 지급 기록":
             st.success("기록되었습니다.")
 
     st.divider()
-    st.dataframe(df.sort_values("시간", ascending=False), use_container_width=True)
+df_sorted = df.dropna(subset=["시간"]).sort_values("시간", ascending=False)
+
+st.dataframe(df_sorted, use_container_width=True)
+
 
 # ======================
 # 2. 통계
