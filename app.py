@@ -5,21 +5,23 @@ from datetime import datetime, date
 import altair as alt
 from io import BytesIO
 from pathlib import Path
+from typing import Optional, List, Tuple
 
 # =========================================================
 # 설정
 # =========================================================
 st.set_page_config(page_title="대구고등법원 환경미화 소모품 스마트 장부", layout="wide")
-st.title("📱 대구고등법원 환경미화 소모품 스마트 장부","만든이 오장일")
+st.title("📱 대구고등법원 환경미화 소모품 스마트 장부")
+st.caption("만든이 오장일")
 
 DB_PATH = Path("inventory.db")
 
 # ⚠️ 실무 운영 시 비밀번호는 반드시 변경하세요.
-# 더 안전하게 하려면 Streamlit Cloud의 Secrets(관리 화면)로 옮기는 것을 권장합니다.
+# 더 안전하게 하려면 Streamlit Cloud의 Secrets로 옮기는 것을 권장합니다.
 ADMIN_PASSWORD = "1234"
 
 # =========================================================
-# 초기 데이터 (PDF에서 추출한 명단/품목 기반)
+# 초기 데이터 (명단/품목)
 # =========================================================
 DEFAULT_RECIPIENTS = [
     "김순영","노나경","김감열","임금란","최점순","최명숙","김상임","김일란",
@@ -40,15 +42,18 @@ DEFAULT_ITEMS = [
 # =========================================================
 # DB 유틸
 # =========================================================
-def run(query: str, params=(), fetch: bool=False):
+def run(query: str, params=(), fetch: bool = False):
+    # Streamlit rerun 환경에서 안전하게
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA foreign_keys = ON;")
-    cur = conn.cursor()
-    cur.execute(query, params)
-    rows = cur.fetchall() if fetch else None
-    conn.commit()
-    conn.close()
-    return rows
+    try:
+        conn.execute("PRAGMA foreign_keys = ON;")
+        cur = conn.cursor()
+        cur.execute(query, params)
+        rows = cur.fetchall() if fetch else None
+        conn.commit()
+        return rows
+    finally:
+        conn.close()
 
 def init_db():
     run("""
@@ -89,13 +94,11 @@ def seed_if_empty():
         for name in DEFAULT_ITEMS:
             run("INSERT OR IGNORE INTO items(name, active) VALUES (?, 1)", (name,))
 
-def get_active_recipients():
-    rows = run("SELECT id, name FROM recipients WHERE active=1 ORDER BY name", fetch=True)
-    return rows
+def get_active_recipients() -> List[Tuple[int, str]]:
+    return run("SELECT id, name FROM recipients WHERE active=1 ORDER BY name", fetch=True)
 
-def get_active_items():
-    rows = run("SELECT id, name FROM items WHERE active=1 ORDER BY name", fetch=True)
-    return rows
+def get_active_items() -> List[Tuple[int, str]]:
+    return run("SELECT id, name FROM items WHERE active=1 ORDER BY name", fetch=True)
 
 def get_all_recipients():
     return run("SELECT id, name, active FROM recipients ORDER BY name", fetch=True)
@@ -103,13 +106,18 @@ def get_all_recipients():
 def get_all_items():
     return run("SELECT id, name, active FROM items ORDER BY name", fetch=True)
 
-def insert_log(ts: datetime, recipient_id: int, item_id: int, qty: int, note: str | None):
+def insert_log(ts: datetime, recipient_id: int, item_id: int, qty: int, note: Optional[str]):
     run(
         "INSERT INTO logs(ts, recipient_id, item_id, qty, note) VALUES (?, ?, ?, ?, ?)",
         (ts.strftime("%Y-%m-%d %H:%M:%S"), recipient_id, item_id, qty, note)
     )
 
-def read_logs(start: date | None = None, end: date | None = None, recipient_id: int | None = None, item_id: int | None = None):
+def read_logs(
+    start: Optional[date] = None,
+    end: Optional[date] = None,
+    recipient_id: Optional[int] = None,
+    item_id: Optional[int] = None
+) -> pd.DataFrame:
     where = []
     params = []
 
@@ -160,13 +168,13 @@ def deactivate_item(item_id: int):
 def activate_item(item_id: int):
     run("UPDATE items SET active=1 WHERE id=?", (item_id,))
 
-def add_recipients(names: list[str]):
+def add_recipients(names: List[str]):
     for n in names:
         n = n.strip()
         if n:
             run("INSERT OR IGNORE INTO recipients(name, active) VALUES (?, 1)", (n,))
 
-def add_items(names: list[str]):
+def add_items(names: List[str]):
     for n in names:
         n = n.strip()
         if n:
@@ -175,6 +183,30 @@ def add_items(names: list[str]):
 def delete_log(log_id: int):
     run("DELETE FROM logs WHERE id=?", (log_id,))
 
+# ====== 추가: 수정/완전삭제 유틸 ======
+def update_recipient_name(recipient_id: int, new_name: str):
+    new_name = new_name.strip()
+    if not new_name:
+        raise ValueError("이름이 비어있습니다.")
+    run("UPDATE recipients SET name=? WHERE id=?", (new_name, recipient_id))
+
+def update_item_name(item_id: int, new_name: str):
+    new_name = new_name.strip()
+    if not new_name:
+        raise ValueError("품목명이 비어있습니다.")
+    run("UPDATE items SET name=? WHERE id=?", (new_name, item_id))
+
+def hard_delete_recipient(recipient_id: int):
+    cnt = run("SELECT COUNT(*) FROM logs WHERE recipient_id=?", (recipient_id,), fetch=True)[0][0]
+    if cnt > 0:
+        raise ValueError(f"이 수령자는 지급 기록 {cnt}건이 연결되어 있어 완전 삭제할 수 없습니다. 비활성화를 사용하세요.")
+    run("DELETE FROM recipients WHERE id=?", (recipient_id,))
+
+def hard_delete_item(item_id: int):
+    cnt = run("SELECT COUNT(*) FROM logs WHERE item_id=?", (item_id,), fetch=True)[0][0]
+    if cnt > 0:
+        raise ValueError(f"이 품목은 지급 기록 {cnt}건이 연결되어 있어 완전 삭제할 수 없습니다. 비활성화를 사용하세요.")
+    run("DELETE FROM items WHERE id=?", (item_id,))
 
 # =========================================================
 # 앱 시작: DB 준비
@@ -316,7 +348,6 @@ elif menu == "📁 내역 조회/다운로드":
         with c2:
             end = st.date_input("종료일", value=max_d, min_value=min_d, max_value=max_d)
 
-        # 선택 필터를 위해 id 매핑을 다시 DB에서 가져옴
         recipients_all = run("SELECT id, name FROM recipients ORDER BY name", fetch=True)
         items_all = run("SELECT id, name FROM items ORDER BY name", fetch=True)
 
@@ -324,11 +355,10 @@ elif menu == "📁 내역 조회/다운로드":
         item_names = ["(전체)"] + [n for _id, n in items_all]
 
         with c3:
-            recip_sel = st.selectbox("수령자", recip_names)
+            recip_sel = st.selectbox("수령자", recip_names, key="dl_recip_sel")
         with c4:
-            item_sel = st.selectbox("품목", item_names)
+            item_sel = st.selectbox("품목", item_names, key="dl_item_sel")
 
-    # 필터 적용을 위해 DB 재조회
     recip_id = None
     item_id = None
     if recip_sel != "(전체)":
@@ -343,21 +373,19 @@ elif menu == "📁 내역 조회/다운로드":
     st.dataframe(filtered, use_container_width=True)
 
     st.divider()
-
     c1, c2 = st.columns(2)
 
     with c1:
-        # CSV 다운로드 (항상 안정)
         csv_bytes = filtered.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
             "⬇️ CSV 다운로드",
             data=csv_bytes,
             file_name="소모품_지급내역.csv",
-            mime="text/csv"
+            mime="text/csv",
+            key="dl_csv"
         )
 
     with c2:
-        # Excel 다운로드 (openpyxl 필요)
         buffer = BytesIO()
         filtered.to_excel(buffer, index=False)
         buffer.seek(0)
@@ -365,7 +393,8 @@ elif menu == "📁 내역 조회/다운로드":
             "⬇️ Excel 다운로드",
             data=buffer,
             file_name="소모품_지급내역.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_xlsx"
         )
 
 # =========================================================
@@ -383,6 +412,9 @@ elif menu == "⚙️ 관리자":
 
     tab1, tab2, tab3 = st.tabs(["수령자 관리", "품목 관리", "기록 관리(삭제)"])
 
+    # -------------------------
+    # 수령자 관리
+    # -------------------------
     with tab1:
         st.markdown("### 수령자 관리")
         st.caption("• 비활성화하면 지급 입력 화면에서 선택되지 않습니다. (기록은 보존됨)")
@@ -393,26 +425,72 @@ elif menu == "⚙️ 관리자":
         st.dataframe(rdf, use_container_width=True)
 
         st.markdown("#### 수령자 추가 (여러 명 가능)")
-        new_names = st.text_area("한 줄에 한 명씩 입력", height=120, placeholder="예)\n홍길동\n김철수")
-        if st.button("➕ 수령자 추가"):
+        new_names = st.text_area("한 줄에 한 명씩 입력", height=120, placeholder="예)\n홍길동\n김철수", key="recip_add_area")
+        if st.button("➕ 수령자 추가", key="recip_add_btn"):
             add_recipients(new_names.splitlines())
             st.success("추가 완료. (중복은 자동 무시)")
             st.rerun()
 
-        st.markdown("#### 활성/비활성 전환")
-        rid = st.number_input("대상 수령자 id", min_value=1, step=1)
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("비활성화"):
-                deactivate_recipient(int(rid))
-                st.success("비활성화 완료")
-                st.rerun()
-        with c2:
-            if st.button("활성화"):
-                activate_recipient(int(rid))
-                st.success("활성화 완료")
-                st.rerun()
+        st.divider()
+        st.markdown("#### 수령자 수정/삭제/활성 전환")
 
+        if not all_r:
+            st.info("수령자가 없습니다.")
+        else:
+            options = [(rid, name, active) for rid, name, active in all_r]
+            labels = [f"[{rid}] {name} ({'활성' if active == 1 else '비활성'})" for rid, name, active in options]
+
+            sel_label = st.selectbox("대상 선택", labels, key="recip_select")
+            sel_idx = labels.index(sel_label)
+            sel_id, sel_name, sel_active = options[sel_idx]
+
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                new_name = st.text_input("이름 수정", value=sel_name, key="recip_new_name")
+            with c2:
+                st.write("")
+                st.write(f"현재 상태: **{'활성' if sel_active == 1 else '비활성'}**")
+
+            b1, b2, b3, b4 = st.columns(4)
+
+            with b1:
+                if st.button("✏️ 이름 저장", key="recip_save_name"):
+                    try:
+                        update_recipient_name(int(sel_id), new_name)
+                        st.success("이름 수정 완료")
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("같은 이름이 이미 존재합니다. (중복 불가)")
+                    except Exception as e:
+                        st.error(str(e))
+
+            with b2:
+                if sel_active == 1:
+                    if st.button("🚫 비활성화", key="recip_deact_btn"):
+                        deactivate_recipient(int(sel_id))
+                        st.success("비활성화 완료")
+                        st.rerun()
+                else:
+                    if st.button("✅ 활성화", key="recip_act_btn"):
+                        activate_recipient(int(sel_id))
+                        st.success("활성화 완료")
+                        st.rerun()
+
+            with b3:
+                if st.button("🗑️ 완전 삭제", key="recip_hard_delete"):
+                    try:
+                        hard_delete_recipient(int(sel_id))
+                        st.success("완전 삭제 완료")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+
+            with b4:
+                st.caption("※ 기록이 연결된 수령자는\n완전 삭제가 막힙니다.\n(비활성화 권장)")
+
+    # -------------------------
+    # 품목 관리
+    # -------------------------
     with tab2:
         st.markdown("### 품목 관리")
         st.caption("• 비활성화하면 지급 입력 화면에서 선택되지 않습니다. (기록은 보존됨)")
@@ -423,36 +501,83 @@ elif menu == "⚙️ 관리자":
         st.dataframe(idf, use_container_width=True)
 
         st.markdown("#### 품목 추가 (여러 개 가능)")
-        new_items = st.text_area("한 줄에 한 품목씩 입력", height=120, placeholder="예)\n탈취제\n방향제")
-        if st.button("➕ 품목 추가"):
+        new_items = st.text_area("한 줄에 한 품목씩 입력", height=120, placeholder="예)\n탈취제\n방향제", key="item_add_area")
+        if st.button("➕ 품목 추가", key="item_add_btn"):
             add_items(new_items.splitlines())
             st.success("추가 완료. (중복은 자동 무시)")
             st.rerun()
 
-        st.markdown("#### 활성/비활성 전환")
-        iid = st.number_input("대상 품목 id", min_value=1, step=1)
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("비활성화", key="item_deact"):
-                deactivate_item(int(iid))
-                st.success("비활성화 완료")
-                st.rerun()
-        with c2:
-            if st.button("활성화", key="item_act"):
-                activate_item(int(iid))
-                st.success("활성화 완료")
-                st.rerun()
+        st.divider()
+        st.markdown("#### 품목 수정/삭제/활성 전환")
 
+        if not all_i:
+            st.info("품목이 없습니다.")
+        else:
+            options = [(iid, name, active) for iid, name, active in all_i]
+            labels = [f"[{iid}] {name} ({'활성' if active == 1 else '비활성'})" for iid, name, active in options]
+
+            sel_label = st.selectbox("대상 선택", labels, key="item_select")
+            sel_idx = labels.index(sel_label)
+            sel_id, sel_name, sel_active = options[sel_idx]
+
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                new_name = st.text_input("품목명 수정", value=sel_name, key="item_new_name")
+            with c2:
+                st.write("")
+                st.write(f"현재 상태: **{'활성' if sel_active == 1 else '비활성'}**")
+
+            b1, b2, b3, b4 = st.columns(4)
+
+            with b1:
+                if st.button("✏️ 품목명 저장", key="item_save_name"):
+                    try:
+                        update_item_name(int(sel_id), new_name)
+                        st.success("품목명 수정 완료")
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("같은 품목명이 이미 존재합니다. (중복 불가)")
+                    except Exception as e:
+                        st.error(str(e))
+
+            with b2:
+                if sel_active == 1:
+                    if st.button("🚫 비활성화", key="item_deact_btn"):
+                        deactivate_item(int(sel_id))
+                        st.success("비활성화 완료")
+                        st.rerun()
+                else:
+                    if st.button("✅ 활성화", key="item_act_btn"):
+                        activate_item(int(sel_id))
+                        st.success("활성화 완료")
+                        st.rerun()
+
+            with b3:
+                if st.button("🗑️ 완전 삭제", key="item_hard_delete"):
+                    try:
+                        hard_delete_item(int(sel_id))
+                        st.success("완전 삭제 완료")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+
+            with b4:
+                st.caption("※ 기록이 연결된 품목은\n완전 삭제가 막힙니다.\n(비활성화 권장)")
+
+    # -------------------------
+    # 기록 관리(삭제)
+    # -------------------------
     with tab3:
         st.markdown("### 기록 관리(삭제)")
         st.caption("• 삭제는 되돌릴 수 없습니다. (실무에서는 가급적 삭제 대신 비고/정정 기록을 권장)")
+
         df = read_logs()
         if df.empty:
             st.info("삭제할 기록이 없습니다.")
         else:
             st.dataframe(df.head(200), use_container_width=True)
-            del_id = st.number_input("삭제할 기록 id", min_value=1, step=1)
-            if st.button("🗑️ 선택 기록 삭제"):
+            del_id = st.number_input("삭제할 기록 id", min_value=1, step=1, key="log_del_id")
+            if st.button("🗑️ 선택 기록 삭제", key="log_del_btn"):
                 delete_log(int(del_id))
                 st.success("삭제 완료")
                 st.rerun()
